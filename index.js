@@ -1,6 +1,7 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, Partials, PermissionsBitField } = require('discord.js');
+const { Client, GatewayIntentBits, Partials, PermissionsBitField, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const { DisTube } = require('distube');
+const { YtDlpPlugin } = require('@distube/yt-dlp');
 
 // ==========================================
 // CONFIGURATION
@@ -56,6 +57,7 @@ client.distube = new DisTube(client, {
     emitNewSongOnly: true,
     emitAddSongWhenCreatingQueue: false,
     emitAddListWhenCreatingQueue: false,
+    plugins: [new YtDlpPlugin()],
     ...(ffmpegPath ? { ffmpeg: { path: ffmpegPath } } : {})
 });
 
@@ -100,39 +102,106 @@ setInterval(() => {
 }, Math.max(CONFIG.RATE_LIMIT_WINDOW_MS, CONFIG.DUPLICATE_MESSAGE_WINDOW_MS));
 
 
-client.once('ready', () => {
+client.once('ready', async () => {
     console.log(`✅ Logged in as ${client.user.tag}!`);
     console.log(`🛡️  CleanChat spam protection is active.`);
+    
+    const commands = [
+        new SlashCommandBuilder()
+            .setName('play')
+            .setDescription('Play a song or playlist from YouTube')
+            .addStringOption(option => 
+                option.setName('url')
+                    .setDescription('The YouTube URL to play')
+                    .setRequired(true)),
+        new SlashCommandBuilder()
+            .setName('skip')
+            .setDescription('Skip the current song'),
+        new SlashCommandBuilder()
+            .setName('stop')
+            .setDescription('Stop the music and clear the queue'),
+        new SlashCommandBuilder()
+            .setName('queue')
+            .setDescription('View the current music queue'),
+        new SlashCommandBuilder()
+            .setName('delete_message')
+            .setDescription('Delete a specific number of recent messages from a user')
+            .addUserOption(option => 
+                option.setName('user')
+                    .setDescription('The user to delete messages from')
+                    .setRequired(true))
+            .addIntegerOption(option => 
+                option.setName('amount')
+                    .setDescription('Number of messages to delete (max 100)'))
+            .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageMessages)
+    ].map(command => command.toJSON());
+
+    const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+    try {
+        console.log('Started refreshing application (/) commands.');
+        await rest.put(
+            Routes.applicationCommands(client.user.id),
+            { body: commands },
+        );
+        console.log('Successfully reloaded application (/) commands.');
+    } catch (error) {
+        console.error(error);
+    }
 });
 
-client.on('messageCreate', async (message) => {
-    // Ignore bots and webhooks
-    if (message.author.bot || message.webhookId) return;
-    // Ignore DMs
-    if (!message.guild) return;
+client.on('interactionCreate', async interaction => {
+    if (!interaction.isChatInputCommand()) return;
 
-    // ==========================================
-    // COMMANDS
-    // ==========================================
-    if (message.content.startsWith('/delete message')) {
-        if (!message.member || !message.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
-            await message.reply('You do not have permission to use this command.');
+    if (interaction.commandName === 'play') {
+        const url = interaction.options.getString('url');
+        const member = interaction.guild.members.cache.get(interaction.user.id);
+        if (!member.voice.channel) {
+            await interaction.reply({ content: 'You must be in a voice channel to play music!', ephemeral: true });
             return;
         }
+        await interaction.reply('🔍 Searching and adding to queue...');
+        client.distube.play(member.voice.channel, url, {
+            member: member,
+            textChannel: interaction.channel,
+        });
+    }
 
-        const args = message.content.split(' ').slice(2);
-        const targetUser = message.mentions.users.first() || client.users.cache.get(args[0]);
-        
-        if (!targetUser) {
-            await message.reply('Please specify a user. Usage: `/delete message @user [amount]`');
-            return;
+    if (interaction.commandName === 'skip') {
+        const queue = client.distube.getQueue(interaction.guildId);
+        if (!queue) return interaction.reply({ content: 'There is nothing playing right now!', ephemeral: true });
+        try {
+            await queue.skip();
+            await interaction.reply('⏭️ Skipped!');
+        } catch (e) {
+            await interaction.reply(`Error: ${e}`);
         }
+    }
 
-        let amount = parseInt(args[1]) || 50;
+    if (interaction.commandName === 'stop') {
+        const queue = client.distube.getQueue(interaction.guildId);
+        if (!queue) return interaction.reply({ content: 'There is nothing playing right now!', ephemeral: true });
+        queue.stop();
+        await interaction.reply('⏹️ Stopped the music!');
+    }
+
+    if (interaction.commandName === 'queue') {
+        const queue = client.distube.getQueue(interaction.guildId);
+        if (!queue) return interaction.reply({ content: 'There is nothing playing right now!', ephemeral: true });
+        const q = queue.songs
+            .map((song, i) => `${i === 0 ? 'Playing:' : `${i}.`} ${song.name} - \`${song.formattedDuration}\``)
+            .join('\n');
+        await interaction.reply(`**Server Queue**\n${q}`.substring(0, 2000));
+    }
+
+    if (interaction.commandName === 'delete_message') {
+        const targetUser = interaction.options.getUser('user');
+        let amount = interaction.options.getInteger('amount') || 50;
         if (amount > 100) amount = 100;
 
+        await interaction.deferReply({ ephemeral: true });
+
         try {
-            const fetched = await message.channel.messages.fetch({ limit: 100 });
+            const fetched = await interaction.channel.messages.fetch({ limit: 100 });
             const userMessages = Array.from(fetched.filter(m => m.author.id === targetUser.id).values()).slice(0, amount);
             
             if (userMessages.length > 0) {
@@ -141,89 +210,36 @@ client.on('messageCreate', async (message) => {
                 const oldMessages = userMessages.filter(m => m.createdTimestamp <= twoWeeksAgo);
 
                 if (recentMessageIds.length > 0) {
-                    await message.channel.bulkDelete(recentMessageIds, true);
+                    await interaction.channel.bulkDelete(recentMessageIds, true);
                 }
 
-                // Delete older messages one by one to bypass the 14-day Discord limit
                 for (const msg of oldMessages) {
                     await msg.delete().catch(() => {});
                 }
 
-                await message.reply(`Successfully deleted ${userMessages.length} messages from ${targetUser.tag}.`);
+                await interaction.editReply(`Successfully deleted ${userMessages.length} messages from ${targetUser.tag}.`);
                 
-                // Log to commands channel
                 if (CONFIG.COMMANDS_CHANNEL_ID) {
-                    const cmdChannel = message.guild.channels.cache.get(CONFIG.COMMANDS_CHANNEL_ID);
+                    const cmdChannel = interaction.guild.channels.cache.get(CONFIG.COMMANDS_CHANNEL_ID);
                     if (cmdChannel) {
-                        await cmdChannel.send(`🗑️ **Command Executed**\n**Admin:** ${message.author.tag}\n**Action:** Deleted ${userMessages.length} messages from ${targetUser.tag} in <#${message.channel.id}>`);
+                        await cmdChannel.send(`🗑️ **Command Executed**\n**Admin:** ${interaction.user.tag}\n**Action:** Deleted ${userMessages.length} messages from ${targetUser.tag} in <#${interaction.channel.id}>`);
                     }
                 }
             } else {
-                await message.reply(`No recent messages found from ${targetUser.tag}.`);
+                await interaction.editReply(`No recent messages found from ${targetUser.tag}.`);
             }
         } catch (error) {
             console.error('Error during purge:', error);
-            await message.reply('There was an error trying to purge messages.');
+            await interaction.editReply('There was an error trying to purge messages.');
         }
-        // Don't process this command message further in spam checks
-        return; 
     }
+});
 
-    // Music Commands
-    if (message.content.startsWith('/play ')) {
-        const args = message.content.split(' ').slice(1);
-        const url = args.join(' ');
-        if (!message.member.voice.channel) {
-            await message.reply('You must be in a voice channel to play music!');
-            return;
-        }
-        await message.reply('🔍 Searching and adding to queue...');
-        client.distube.play(message.member.voice.channel, url, {
-            member: message.member,
-            textChannel: message.channel,
-            message
-        });
-        return;
-    }
-    
-    if (message.content === '/skip') {
-        const queue = client.distube.getQueue(message);
-        if (!queue) {
-            await message.reply('There is nothing playing right now!');
-            return;
-        }
-        try {
-            await queue.skip();
-            await message.reply('⏭️ Skipped!');
-        } catch (e) {
-            await message.reply(`Error: ${e}`);
-        }
-        return;
-    }
-    
-    if (message.content === '/stop') {
-        const queue = client.distube.getQueue(message);
-        if (!queue) {
-            await message.reply('There is nothing playing right now!');
-            return;
-        }
-        queue.stop();
-        await message.reply('⏹️ Stopped the music!');
-        return;
-    }
-
-    if (message.content === '/queue') {
-        const queue = client.distube.getQueue(message);
-        if (!queue) {
-            await message.reply('There is nothing playing right now!');
-            return;
-        }
-        const q = queue.songs
-            .map((song, i) => `${i === 0 ? 'Playing:' : `${i}.`} ${song.name} - \`${song.formattedDuration}\``)
-            .join('\n');
-        await message.reply(`**Server Queue**\n${q}`.substring(0, 2000));
-        return;
-    }
+client.on('messageCreate', async (message) => {
+    // Ignore bots and webhooks
+    if (message.author.bot || message.webhookId) return;
+    // Ignore DMs
+    if (!message.guild) return;
 
     // ==========================================
     // EXEMPTIONS

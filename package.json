@@ -12,6 +12,8 @@
   "type": "commonjs",
   "dependencies": {
     "@discordjs/voice": "^0.19.2",
+    "@distube/yt-dlp": "^2.0.1",
+    "@distube/ytdl-core": "^4.16.12",
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "discord.js": "^14.27.0",
     "distube": "^5.2.3",
