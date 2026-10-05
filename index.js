@@ -153,17 +153,36 @@ client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
     if (interaction.commandName === 'play') {
-        const url = interaction.options.getString('url');
+        let url = interaction.options.getString('url');
         const member = interaction.guild.members.cache.get(interaction.user.id);
         if (!member.voice.channel) {
             await interaction.reply({ content: 'You must be in a voice channel to play music!', ephemeral: true });
             return;
         }
-        await interaction.reply('🔍 Searching and adding to queue...');
-        client.distube.play(member.voice.channel, url, {
-            member: member,
-            textChannel: interaction.channel,
-        });
+
+        if (url.includes('list=RD')) {
+            try {
+                const urlObj = new URL(url);
+                urlObj.searchParams.delete('list');
+                urlObj.searchParams.delete('start_radio');
+                urlObj.searchParams.delete('index');
+                url = urlObj.toString();
+                await interaction.reply('⚠️ *YouTube Mix playlists are not supported by Discord bots. Playing the single video instead!* \n🔍 Searching and adding to queue...');
+            } catch(e) {
+                await interaction.reply('🔍 Searching and adding to queue...');
+            }
+        } else {
+            await interaction.reply('🔍 Searching and adding to queue...');
+        }
+
+        try {
+            await client.distube.play(member.voice.channel, url, {
+                member: member,
+                textChannel: interaction.channel,
+            });
+        } catch (e) {
+            interaction.channel.send(`❌ Failed to play: ${e.message}`);
+        }
     }
 
     if (interaction.commandName === 'skip') {
