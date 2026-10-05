@@ -1,5 +1,6 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, Partials, PermissionsBitField } = require('discord.js');
+const { DisTube } = require('distube');
 
 // ==========================================
 // CONFIGURATION
@@ -19,6 +20,14 @@ const CONFIG = {
     LOG_CHANNEL_ID: '',             // ID of the channel to send logs to (leave empty to disable)
     COMMANDS_CHANNEL_ID: '',        // ID of the channel to send command logs to
     EXEMPT_ROLES: [],               // Array of Role IDs that are exempt from spam checks
+
+    // Advanced Features
+    BANNED_WORDS: ['badword1', 'badword2'],
+    WHITELISTED_DOMAINS: ['youtube.com', 'tenor.com', 'discord.com', 'tenor.co'],
+    MAX_ATTACHMENTS: 4,             // Max attachments per message
+    CAPS_THRESHOLD_PERCENT: 70,     // Percentage of caps allowed before flagging
+    RAID_TIMEOUT_WINDOW_MS: 5 * 60 * 1000, // 5 minutes
+    RAID_TIMEOUT_THRESHOLD: 5,      // 5 timeouts in 5 mins triggers lockdown
 };
 
 // ==========================================
@@ -30,12 +39,39 @@ const client = new Client({
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.GuildVoiceStates,
     ],
     partials: [Partials.Message, Partials.Channel, Partials.GuildMember],
 });
 
+// Setup DisTube
+let ffmpegPath = '';
+try {
+    ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+} catch (err) {
+    console.log('No @ffmpeg-installer/ffmpeg found, defaulting to system ffmpeg.');
+}
+
+client.distube = new DisTube(client, {
+    emitNewSongOnly: true,
+    emitAddSongWhenCreatingQueue: false,
+    emitAddListWhenCreatingQueue: false,
+    ...(ffmpegPath ? { ffmpeg: { path: ffmpegPath } } : {})
+});
+
+client.distube
+    .on('playSong', (queue, song) => queue.textChannel.send(`🎶 Now playing: \`${song.name}\` - \`${song.formattedDuration}\``))
+    .on('addSong', (queue, song) => queue.textChannel.send(`✅ Added \`${song.name}\` to the queue.`))
+    .on('addList', (queue, playlist) => queue.textChannel.send(`📋 Added \`${playlist.name}\` playlist (${playlist.songs.length} songs) to queue.`))
+    .on('error', (channel, e) => {
+        if (channel) channel.send(`❌ An error encountered: ${e.toString().slice(0, 1974)}`);
+        else console.error(e);
+    });
+
 // Memory storage for user activity
 const userActivity = new Map();
+const recentTimeouts = [];
+let isRaidMode = false;
 
 // Helper to get or create user data
 function getUserData(userId) {
@@ -133,6 +169,62 @@ client.on('messageCreate', async (message) => {
         return; 
     }
 
+    // Music Commands
+    if (message.content.startsWith('/play ')) {
+        const args = message.content.split(' ').slice(1);
+        const url = args.join(' ');
+        if (!message.member.voice.channel) {
+            await message.reply('You must be in a voice channel to play music!');
+            return;
+        }
+        await message.reply('🔍 Searching and adding to queue...');
+        client.distube.play(message.member.voice.channel, url, {
+            member: message.member,
+            textChannel: message.channel,
+            message
+        });
+        return;
+    }
+    
+    if (message.content === '/skip') {
+        const queue = client.distube.getQueue(message);
+        if (!queue) {
+            await message.reply('There is nothing playing right now!');
+            return;
+        }
+        try {
+            await queue.skip();
+            await message.reply('⏭️ Skipped!');
+        } catch (e) {
+            await message.reply(`Error: ${e}`);
+        }
+        return;
+    }
+    
+    if (message.content === '/stop') {
+        const queue = client.distube.getQueue(message);
+        if (!queue) {
+            await message.reply('There is nothing playing right now!');
+            return;
+        }
+        queue.stop();
+        await message.reply('⏹️ Stopped the music!');
+        return;
+    }
+
+    if (message.content === '/queue') {
+        const queue = client.distube.getQueue(message);
+        if (!queue) {
+            await message.reply('There is nothing playing right now!');
+            return;
+        }
+        const q = queue.songs
+            .map((song, i) => `${i === 0 ? 'Playing:' : `${i}.`} ${song.name} - \`${song.formattedDuration}\``)
+            .join('\n');
+        await message.reply(`**Server Queue**\n${q}`.substring(0, 2000));
+        return;
+    }
+
     // ==========================================
     // EXEMPTIONS
     // ==========================================
@@ -170,9 +262,57 @@ client.on('messageCreate', async (message) => {
         reason = 'Discord Invite Link';
     } else {
         const links = message.content.match(linkRegex);
-        if (links && links.length > CONFIG.MAX_LINKS) {
+        if (links) {
+            const nonWhitelistedLinks = links.filter(link => {
+                return !CONFIG.WHITELISTED_DOMAINS.some(domain => link.toLowerCase().includes(domain));
+            });
+            if (nonWhitelistedLinks.length > CONFIG.MAX_LINKS) {
+                isSpam = true;
+                reason = 'Excessive Links';
+            }
+        }
+    }
+
+    // 2.5 Attachment Spam
+    if (!isSpam && message.attachments.size > CONFIG.MAX_ATTACHMENTS) {
+        isSpam = true;
+        reason = 'Excessive Attachments';
+    }
+
+    // 2.6 Banned Words & Phishing
+    if (!isSpam) {
+        const lowerContent = message.content.toLowerCase();
+        
+        // Phishing keywords
+        const scamKeywords = ['free nitro', 'steam $50', 'discord.gift/', 'discord.com/billing'];
+        if (scamKeywords.some(keyword => lowerContent.includes(keyword))) {
             isSpam = true;
-            reason = 'Excessive Links';
+            reason = 'Phishing/Scam Link';
+            userData.violations += 99; // Instant timeout
+        } 
+        // Banned words
+        else if (CONFIG.BANNED_WORDS.some(word => lowerContent.includes(word.toLowerCase()))) {
+            isSpam = true;
+            reason = 'Banned Word';
+        }
+    }
+
+    // 2.7 Caps Spam
+    if (!isSpam && message.content.length > 10) {
+        const capsCount = (message.content.match(/[A-Z]/g) || []).length;
+        const alphaCount = (message.content.match(/[a-zA-Z]/g) || []).length;
+        if (alphaCount > 0 && (capsCount / alphaCount) * 100 > CONFIG.CAPS_THRESHOLD_PERCENT) {
+            isSpam = true;
+            reason = 'Excessive Caps';
+        }
+    }
+
+    // 2.8 Zalgo Text
+    if (!isSpam) {
+        const zalgoRegex = /[\u0300-\u036F\u1DC0-\u1DFF\u20D0-\u20FF\uFE20-\uFE2F]{3,}/g;
+        if (zalgoRegex.test(message.content)) {
+            isSpam = true;
+            reason = 'Zalgo Text';
         }
     }
 
@@ -258,6 +398,40 @@ client.on('messageCreate', async (message) => {
                         const logChannel = message.guild.channels.cache.get(CONFIG.LOG_CHANNEL_ID);
                         if (logChannel) {
                             await logChannel.send(`🔨 **Timeout Applied**\n**User:** ${message.author.tag} (<@${message.author.id}>) has been timed out for exceeding spam limits.`);
+                        }
+                    }
+
+                    // Raid Mode Tracker
+                    recentTimeouts.push(Date.now());
+                    const validTimeouts = recentTimeouts.filter(t => Date.now() - t < CONFIG.RAID_TIMEOUT_WINDOW_MS);
+                    recentTimeouts.length = 0;
+                    recentTimeouts.push(...validTimeouts);
+
+                    if (recentTimeouts.length >= CONFIG.RAID_TIMEOUT_THRESHOLD && !isRaidMode) {
+                        isRaidMode = true;
+                        try {
+                            await message.channel.permissionOverwrites.edit(message.guild.roles.everyone, {
+                                SendMessages: false
+                            });
+                            console.log('[RAID MODE] Server channel locked down due to multiple timeouts.');
+                            
+                            if (CONFIG.LOG_CHANNEL_ID) {
+                                const logChannel = message.guild.channels.cache.get(CONFIG.LOG_CHANNEL_ID);
+                                if (logChannel) {
+                                    await logChannel.send(`🚨 **RAID DETECTED** 🚨\nMultiple users timed out rapidly. <#${message.channel.id}> has been locked down for 15 minutes.`);
+                                }
+                            }
+
+                            // Unlock after 15 mins
+                            setTimeout(async () => {
+                                await message.channel.permissionOverwrites.edit(message.guild.roles.everyone, {
+                                    SendMessages: null
+                                });
+                                isRaidMode = false;
+                                console.log('[RAID MODE] Lockdown lifted.');
+                            }, 15 * 60 * 1000);
+                        } catch (err) {
+                            console.error('Failed to apply lockdown:', err);
                         }
                     }
                 }
