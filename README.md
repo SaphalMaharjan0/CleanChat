@@ -3,8 +3,8 @@
 A Discord bot built with Node.js and discord.js v14 that automatically detects and deletes spam messages, including rate spam, duplicate messages, mass mentions, and excessive/invite links. It also automatically times out users who repeatedly spam.
 
 ## Features
-- **24/7 Voice Channel Persistence:** Bot joins voice channel and stays forever (even when empty or songs finish) until disconnected by an Admin.
-- **Auto-Reconnect:** If disconnected unexpectedly or due to server connection issues, automatically rejoins the target voice channel.
+- **24/7 Voice Channel Persistence:** Once the bot joins a voice channel (via `/join` or `/play`), it stays indefinitely. It stays after `/stop`, when the queue finishes, and even when the channel is empty. The ONLY way to make it leave is via the Administrator `/leave` command.
+- **Auto-Reconnect & Restart Persistence:** The bot saves its target voice channels to a file. If it gets disconnected, crashes, or the server is rebooted, it will automatically rejoin all saved voice channels using exponential backoff. Manual disconnects by users via the Discord UI are treated identically to network drops and will also trigger an auto-reconnect unless `/leave` is used.
 - **Rate Spam Detection:** Limits how many messages a user can send within a specific time window.
 - **Duplicate Messages:** Deletes messages if a user sends the exact same content multiple times.
 - **Mass Mentions:** Prevents users from mentioning too many users/roles in a single message.

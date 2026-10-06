@@ -6,7 +6,7 @@ import { onMessage } from './events/spam.js';
 import { onVoiceStateUpdate } from './events/voiceState.js';
 import { createDistube } from './player.js';
 import { startServer } from './server.js';
-import { raid, startCleanupTimer } from './state.js';
+import { raid, startCleanupTimer, loadStayChannels, stayVoiceChannels, clearStayChannel } from './state.js';
 
 process.on('unhandledRejection', error => {
     console.error('[Unhandled Rejection]', error);
@@ -46,6 +46,26 @@ client.once(Events.ClientReady, async () => {
         console.log('Successfully reloaded application (/) commands.');
     } catch (error) {
         console.error(error);
+    }
+
+    loadStayChannels();
+    for (const [guildId, channelId] of stayVoiceChannels) {
+        const guild = client.guilds.cache.get(guildId);
+        if (!guild) {
+            clearStayChannel(guildId);
+            continue;
+        }
+        const channel = guild.channels.cache.get(channelId) || await guild.channels.fetch(channelId).catch(() => null);
+        if (!channel || !channel.permissionsFor(client.user)?.has(['Connect', 'Speak'])) {
+            clearStayChannel(guildId);
+            continue;
+        }
+        try {
+            await client.distube.voices.join(channel);
+            console.log(`[VC] Reconnected to ${channel.name} in ${guild.name} from saved state.`);
+        } catch (e) {
+            console.error(`[VC] Failed to auto-reconnect to ${guild.name} on boot:`, e);
+        }
     }
 });
 

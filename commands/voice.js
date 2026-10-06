@@ -1,5 +1,5 @@
 import { PermissionsBitField, SlashCommandBuilder } from 'discord.js';
-import { stayVoiceChannels } from '../state.js';
+import { setStayChannel, clearStayChannel } from '../state.js';
 import { EPHEMERAL } from '../utils.js';
 
 export const join = {
@@ -14,7 +14,7 @@ export const join = {
         }
         try {
             await interaction.client.distube.voices.join(channel);
-            stayVoiceChannels.set(interaction.guildId, channel.id);
+            setStayChannel(interaction.guildId, channel.id);
             await interaction.reply(`🔊 Joined **${channel.name}**! I will stay in this channel 24/7 until disconnected by an admin with \`/leave\`.`);
         } catch (e) {
             await interaction.reply({ content: `❌ Failed to join voice channel: ${e.message}`, flags: EPHEMERAL });
@@ -30,7 +30,7 @@ export const leave = {
 
     async execute(interaction) {
         const { distube } = interaction.client;
-        stayVoiceChannels.delete(interaction.guildId);
+        clearStayChannel(interaction.guildId);
         if (!distube.voices.get(interaction.guildId)) {
             return interaction.reply({ content: '❌ I am not currently connected to any voice channel in this server.', flags: EPHEMERAL });
         }

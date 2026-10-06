@@ -1,6 +1,6 @@
 import { EmbedBuilder, SlashCommandBuilder } from 'discord.js';
 import { RepeatMode } from 'distube';
-import { customRepeat, stayVoiceChannels } from '../state.js';
+import { customRepeat, setStayChannel } from '../state.js';
 import { EPHEMERAL } from '../utils.js';
 
 const NO_QUEUE = '❌ There is no active music queue right now!';
@@ -123,7 +123,7 @@ export const play = {
             });
         }
 
-        stayVoiceChannels.set(interaction.guildId, voiceChannel.id);
+        setStayChannel(interaction.guildId, voiceChannel.id);
         await interaction.deferReply().catch(() => {});
 
         const { url, mix } = cleanUrl(input);
