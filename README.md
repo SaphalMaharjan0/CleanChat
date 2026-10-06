@@ -3,12 +3,26 @@
 A Discord bot built with Node.js and discord.js v14 that automatically detects and deletes spam messages, including rate spam, duplicate messages, mass mentions, and excessive/invite links. It also automatically times out users who repeatedly spam.
 
 ## Features
+- **24/7 Voice Channel Persistence:** Bot joins voice channel and stays forever (even when empty or songs finish) until disconnected by an Admin.
+- **Auto-Reconnect:** If disconnected unexpectedly or due to server connection issues, automatically rejoins the target voice channel.
 - **Rate Spam Detection:** Limits how many messages a user can send within a specific time window.
 - **Duplicate Messages:** Deletes messages if a user sends the exact same content multiple times.
 - **Mass Mentions:** Prevents users from mentioning too many users/roles in a single message.
 - **Link & Invite Filtering:** Deletes messages with too many HTTP links, and immediately deletes any Discord invite links.
 - **Automatic Timeouts:** Automatically times out users after a configurable number of spam violations.
 - **Exemptions:** Users with the "Manage Messages" permission or specific roles are exempt from spam checks.
+
+## Slash Commands
+- `/join` - Make the bot join your current voice channel and stay 24/7.
+- `/leave` - Disconnect the bot from voice channel (*Admin only*).
+- `/play <url> [repeat] [loop]` - Play music with optional repeat count or infinite loop.
+- `/repeat <mode> [times]` - Set repeat mode (`song`, `queue`, `off`) indefinitely or for a custom number of times.
+- `/shuffle` - Randomly shuffle the order of songs in the current playlist/queue.
+- `/skip` - Skip current song.
+- `/stop` - Stop playback and clear the queue without leaving the VC.
+- `/playlist [page]` - View the current music playlist and song details with pagination.
+- `/queue [page]` - View active music queue/playlist.
+- `/delete_message <user> [amount]` - Bulk delete messages from a specific user.
 
 ## Setup Instructions
 

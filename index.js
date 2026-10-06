@@ -1,7 +1,15 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, Partials, PermissionsBitField, REST, Routes, SlashCommandBuilder } = require('discord.js');
-const { DisTube } = require('distube');
-const { YtDlpPlugin } = require('@distube/yt-dlp');
+const { Client, GatewayIntentBits, Partials, PermissionsBitField, REST, Routes, SlashCommandBuilder, Events, EmbedBuilder } = require('discord.js');
+const { DisTube, RepeatMode } = require('distube');
+const { YouTubePlugin } = require('@distube/youtube');
+
+process.on('unhandledRejection', error => {
+    console.error('[Unhandled Rejection]', error);
+});
+
+process.on('uncaughtException', error => {
+    console.error('[Uncaught Exception]', error);
+});
 
 // ==========================================
 // CONFIGURATION
@@ -57,23 +65,77 @@ client.distube = new DisTube(client, {
     emitNewSongOnly: true,
     emitAddSongWhenCreatingQueue: false,
     emitAddListWhenCreatingQueue: false,
-    plugins: [new YtDlpPlugin()],
+    plugins: [new YouTubePlugin()],
     ...(ffmpegPath ? { ffmpeg: { path: ffmpegPath } } : {})
 });
 
-client.distube
-    .on('playSong', (queue, song) => queue.textChannel.send(`🎶 Now playing: \`${song.name}\` - \`${song.formattedDuration}\``))
-    .on('addSong', (queue, song) => queue.textChannel.send(`✅ Added \`${song.name}\` to the queue.`))
-    .on('addList', (queue, playlist) => queue.textChannel.send(`📋 Added \`${playlist.name}\` playlist (${playlist.songs.length} songs) to queue.`))
-    .on('error', (channel, e) => {
-        if (channel) channel.send(`❌ An error encountered: ${e.toString().slice(0, 1974)}`);
-        else console.error(e);
-    });
-
-// Memory storage for user activity
+// Memory storage for user activity, 24/7 voice channels & repeat tracking
 const userActivity = new Map();
+const stayVoiceChannels = new Map(); // guildId -> channelId for 24/7 VC persistence
+const customRepeat = new Map();     // guildId -> { remaining: number, total: number }
 const recentTimeouts = [];
 let isRaidMode = false;
+
+client.distube
+    .on('playSong', (queue, song) => {
+        console.log(`[🎵 PLAYING] ${song.name} - ${song.formattedDuration} | By: ${song.user.tag}`);
+        const repeatInfo = customRepeat.get(queue.id);
+        const repeatText = repeatInfo ? ` 🔁 *(Repeat remaining: ${repeatInfo.remaining})*` : (queue.repeatMode === RepeatMode.SONG ? ' 🔁 *(Looping indefinitely)*' : (queue.repeatMode === RepeatMode.QUEUE ? ' 🔁 *(Queue looping)*' : ''));
+        queue.textChannel?.send(`🎶 Now playing: \`${song.name}\` - \`${song.formattedDuration}\`${repeatText}`);
+    })
+    .on('finishSong', (queue, song) => {
+        const tracker = customRepeat.get(queue.id);
+        if (tracker && tracker.remaining > 0) {
+            tracker.remaining--;
+            if (tracker.remaining === 0) {
+                queue.setRepeatMode(RepeatMode.DISABLED);
+                customRepeat.delete(queue.id);
+                queue.textChannel?.send(`🔁 Finished repeating \`${song.name}\` (${tracker.total} times). Repeat mode disabled.`);
+            }
+        }
+    })
+    .on('addSong', (queue, song) => {
+        console.log(`[✅ QUEUED] ${song.name} - ${song.formattedDuration} | By: ${song.user.tag}`);
+        queue.textChannel?.send(`✅ Added \`${song.name}\` to the queue.`);
+    })
+    .on('addList', (queue, playlist) => {
+        console.log(`[📋 PLAYLIST QUEUED] ${playlist.name} (${playlist.songs.length} songs) | By: ${playlist.user.tag}`);
+        queue.textChannel?.send(`📋 Added \`${playlist.name}\` playlist (${playlist.songs.length} songs) to queue.`);
+    })
+    .on('error', (channel, e) => {
+        console.error(`[❌ DISTUBE ERROR] ${e.toString().slice(0, 500)}`);
+        if (channel) channel.send(`❌ An error encountered: ${e.toString().slice(0, 1974)}`);
+    })
+    .on('disconnect', queue => {
+         console.log(`[🔌 DISCONNECTED] Left voice channel in ${queue.voice.channel?.guild?.name}`);
+    })
+    .on('finish', queue => {
+         console.log(`[🏁 FINISHED] The queue has ended.`);
+    })
+    .on('empty', queue => {
+         console.log(`[🕳️ EMPTY VC] Voice channel is empty.`);
+    });
+
+// Voice Channel State Tracking
+client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
+    if (newState.member?.id !== client.user.id && oldState.member?.id !== client.user.id) return;
+
+    const guildId = newState.guild.id;
+
+    // If bot was moved to a different voice channel, track the new channel
+    if (newState.channelId) {
+        if (stayVoiceChannels.has(guildId)) {
+            stayVoiceChannels.set(guildId, newState.channelId);
+        }
+        return;
+    }
+
+    // If bot was disconnected by an admin/user, clean up state
+    if (!newState.channelId) {
+        stayVoiceChannels.delete(guildId);
+        console.log(`[VC] Bot disconnected from voice channel in ${newState.guild.name}.`);
+    }
+});
 
 // Helper to get or create user data
 function getUserData(userId) {
@@ -102,27 +164,71 @@ setInterval(() => {
 }, Math.max(CONFIG.RATE_LIMIT_WINDOW_MS, CONFIG.DUPLICATE_MESSAGE_WINDOW_MS));
 
 
-client.once('ready', async () => {
+client.once(Events.ClientReady, async () => {
     console.log(`✅ Logged in as ${client.user.tag}!`);
     console.log(`🛡️  CleanChat spam protection is active.`);
     
     const commands = [
+        new SlashCommandBuilder()
+            .setName('join')
+            .setDescription('Make the bot join your current voice channel and stay 24/7'),
+        new SlashCommandBuilder()
+            .setName('leave')
+            .setDescription('Disconnect the bot from the voice channel (Admin only)')
+            .setDefaultMemberPermissions(PermissionsBitField.Flags.Administrator),
         new SlashCommandBuilder()
             .setName('play')
             .setDescription('Play a song or playlist from YouTube')
             .addStringOption(option => 
                 option.setName('url')
                     .setDescription('The YouTube URL to play')
-                    .setRequired(true)),
+                    .setRequired(true))
+            .addIntegerOption(option =>
+                option.setName('repeat')
+                    .setDescription('Number of times to repeat this song (e.g. 3)'))
+            .addBooleanOption(option =>
+                option.setName('loop')
+                    .setDescription('Loop this song indefinitely (true/false)')),
+        new SlashCommandBuilder()
+            .setName('repeat')
+            .setDescription('Repeat the current song or queue (indefinitely or a specific number of times)')
+            .addStringOption(option =>
+                option.setName('mode')
+                    .setDescription('Repeat mode')
+                    .setRequired(true)
+                    .addChoices(
+                        { name: 'Repeat Song (Current Song)', value: 'song' },
+                        { name: 'Repeat Queue (All Songs)', value: 'queue' },
+                        { name: 'Off (Disable Repeat)', value: 'off' }
+                    ))
+            .addIntegerOption(option =>
+                option.setName('times')
+                    .setDescription('Number of times to repeat (optional, leave empty for indefinite repeat)')
+                    .setMinValue(1)
+                    .setMaxValue(100)),
+        new SlashCommandBuilder()
+            .setName('shuffle')
+            .setDescription('Shuffle the songs in the current playlist/queue'),
         new SlashCommandBuilder()
             .setName('skip')
             .setDescription('Skip the current song'),
         new SlashCommandBuilder()
             .setName('stop')
-            .setDescription('Stop the music and clear the queue'),
+            .setDescription('Stop the music and clear the queue (stays in VC)'),
+        new SlashCommandBuilder()
+            .setName('playlist')
+            .setDescription('View the current music playlist with pagination and details')
+            .addIntegerOption(option =>
+                option.setName('page')
+                    .setDescription('Page number to view (1, 2, 3...)')
+                    .setMinValue(1)),
         new SlashCommandBuilder()
             .setName('queue')
-            .setDescription('View the current music queue'),
+            .setDescription('View the current music queue/playlist')
+            .addIntegerOption(option =>
+                option.setName('page')
+                    .setDescription('Page number to view (1, 2, 3...)')
+                    .setMinValue(1)),
         new SlashCommandBuilder()
             .setName('delete_message')
             .setDescription('Delete a specific number of recent messages from a user')
@@ -151,14 +257,50 @@ client.once('ready', async () => {
 
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
+    
+    console.log(`[💻 COMMAND] /${interaction.commandName} used by ${interaction.user.tag} in ${interaction.guild.name}`);
+
+    if (interaction.commandName === 'join') {
+        const member = interaction.guild.members.cache.get(interaction.user.id);
+        if (!member || !member.voice.channel) {
+            return interaction.reply({ content: '❌ You must be in a voice channel to use this command!', ephemeral: true });
+        }
+        try {
+            await client.distube.voices.join(member.voice.channel);
+            stayVoiceChannels.set(interaction.guildId, member.voice.channel.id);
+            await interaction.reply(`🔊 Joined **${member.voice.channel.name}**! I will stay in this channel 24/7 until disconnected by an admin with \`/leave\`.`);
+        } catch (e) {
+            await interaction.reply({ content: `❌ Failed to join voice channel: ${e.message}`, ephemeral: true });
+        }
+        return;
+    }
+
+    if (interaction.commandName === 'leave') {
+        stayVoiceChannels.delete(interaction.guildId);
+        const voiceConnection = client.distube.voices.get(interaction.guildId);
+        if (!voiceConnection) {
+            return interaction.reply({ content: '❌ I am not currently connected to any voice channel in this server.', ephemeral: true });
+        }
+        try {
+            await client.distube.voices.leave(interaction.guildId);
+            await interaction.reply('👋 Successfully disconnected from the voice channel.');
+        } catch (e) {
+            await interaction.reply({ content: `❌ Failed to disconnect: ${e.message}`, ephemeral: true });
+        }
+        return;
+    }
 
     if (interaction.commandName === 'play') {
         let url = interaction.options.getString('url');
+        const repeatTimes = interaction.options.getInteger('repeat');
+        const loopIndefinite = interaction.options.getBoolean('loop');
         const member = interaction.guild.members.cache.get(interaction.user.id);
-        if (!member.voice.channel) {
-            await interaction.reply({ content: 'You must be in a voice channel to play music!', ephemeral: true });
-            return;
+        if (!member || !member.voice.channel) {
+            return interaction.reply({ content: '❌ You must be in a voice channel to play music!', ephemeral: true }).catch(() => {});
         }
+
+        stayVoiceChannels.set(interaction.guildId, member.voice.channel.id);
+        await interaction.deferReply().catch(() => {});
 
         if (url.includes('list=RD')) {
             try {
@@ -166,13 +308,21 @@ client.on('interactionCreate', async interaction => {
                 urlObj.searchParams.delete('list');
                 urlObj.searchParams.delete('start_radio');
                 urlObj.searchParams.delete('index');
+                urlObj.searchParams.delete('t');
                 url = urlObj.toString();
-                await interaction.reply('⚠️ *YouTube Mix playlists are not supported by Discord bots. Playing the single video instead!* \n🔍 Searching and adding to queue...');
+                await interaction.editReply('⚠️ *YouTube Mix playlists are not supported by Discord bots. Playing the single video instead!* \n🔍 Searching and adding to queue...').catch(() => {});
             } catch(e) {
-                await interaction.reply('🔍 Searching and adding to queue...');
+                await interaction.editReply('🔍 Searching and adding to queue...').catch(() => {});
             }
         } else {
-            await interaction.reply('🔍 Searching and adding to queue...');
+            try {
+                if (url.includes('t=')) {
+                    const urlObj = new URL(url);
+                    urlObj.searchParams.delete('t');
+                    url = urlObj.toString();
+                }
+            } catch(e) {}
+            await interaction.editReply('🔍 Searching and adding to queue...').catch(() => {});
         }
 
         try {
@@ -180,12 +330,88 @@ client.on('interactionCreate', async interaction => {
                 member: member,
                 textChannel: interaction.channel,
             });
+
+            if (loopIndefinite) {
+                setTimeout(() => {
+                    const queue = client.distube.getQueue(interaction.guildId);
+                    if (queue) {
+                        customRepeat.delete(interaction.guildId);
+                        queue.setRepeatMode(RepeatMode.SONG);
+                    }
+                }, 1000);
+            } else if (repeatTimes && repeatTimes > 0) {
+                setTimeout(() => {
+                    const queue = client.distube.getQueue(interaction.guildId);
+                    if (queue) {
+                        queue.setRepeatMode(RepeatMode.SONG);
+                        customRepeat.set(interaction.guildId, {
+                            remaining: repeatTimes,
+                            total: repeatTimes
+                        });
+                    }
+                }, 1000);
+            }
         } catch (e) {
-            interaction.channel.send(`❌ Failed to play: ${e.message}`);
+            interaction.followUp({ content: `❌ Failed to play: ${e.message}`, ephemeral: true }).catch(() => {});
+        }
+        return;
+    }
+
+    if (interaction.commandName === 'repeat') {
+        const queue = client.distube.getQueue(interaction.guildId);
+        if (!queue) return interaction.reply({ content: '❌ There is no active music queue right now!', ephemeral: true });
+
+        const mode = interaction.options.getString('mode');
+        const times = interaction.options.getInteger('times');
+
+        if (mode === 'off') {
+            queue.setRepeatMode(RepeatMode.DISABLED);
+            customRepeat.delete(interaction.guildId);
+            return interaction.reply('⏹️ Repeat mode disabled.');
+        }
+
+        if (mode === 'queue') {
+            customRepeat.delete(interaction.guildId);
+            queue.setRepeatMode(RepeatMode.QUEUE);
+            return interaction.reply('🔁 Now repeating the **entire queue** indefinitely.');
+        }
+
+        if (mode === 'song') {
+            const currentSong = queue.songs[0];
+            const songName = currentSong ? currentSong.name : 'Current song';
+
+            if (times && times > 0) {
+                queue.setRepeatMode(RepeatMode.SONG);
+                customRepeat.set(interaction.guildId, {
+                    remaining: times,
+                    total: times
+                });
+                return interaction.reply(`🔁 Repeating **${songName}** for **${times}** time(s).`);
+            } else {
+                customRepeat.delete(interaction.guildId);
+                queue.setRepeatMode(RepeatMode.SONG);
+                return interaction.reply(`🔁 Repeating **${songName}** **indefinitely** (loop forever).`);
+            }
         }
     }
 
+    if (interaction.commandName === 'shuffle') {
+        const queue = client.distube.getQueue(interaction.guildId);
+        if (!queue) return interaction.reply({ content: '❌ There is no active music queue right now!', ephemeral: true });
+        if (queue.songs.length <= 1) {
+            return interaction.reply({ content: '⚠️ Need at least 2 songs in the queue to shuffle.', ephemeral: true });
+        }
+        try {
+            await queue.shuffle();
+            await interaction.reply(`🔀 Successfully shuffled **${queue.songs.length - 1}** upcoming songs in the queue!`);
+        } catch (e) {
+            await interaction.reply({ content: `❌ Failed to shuffle queue: ${e.message}`, ephemeral: true });
+        }
+        return;
+    }
+
     if (interaction.commandName === 'skip') {
+        customRepeat.delete(interaction.guildId);
         const queue = client.distube.getQueue(interaction.guildId);
         if (!queue) return interaction.reply({ content: 'There is nothing playing right now!', ephemeral: true });
         try {
@@ -197,19 +423,70 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (interaction.commandName === 'stop') {
+        customRepeat.delete(interaction.guildId);
         const queue = client.distube.getQueue(interaction.guildId);
         if (!queue) return interaction.reply({ content: 'There is nothing playing right now!', ephemeral: true });
         queue.stop();
-        await interaction.reply('⏹️ Stopped the music!');
+        await interaction.reply('⏹️ Stopped the music! (Staying connected to voice channel)');
     }
 
-    if (interaction.commandName === 'queue') {
+    if (interaction.commandName === 'playlist' || interaction.commandName === 'queue') {
         const queue = client.distube.getQueue(interaction.guildId);
-        if (!queue) return interaction.reply({ content: 'There is nothing playing right now!', ephemeral: true });
-        const q = queue.songs
-            .map((song, i) => `${i === 0 ? 'Playing:' : `${i}.`} ${song.name} - \`${song.formattedDuration}\``)
-            .join('\n');
-        await interaction.reply(`**Server Queue**\n${q}`.substring(0, 2000));
+        if (!queue || queue.songs.length === 0) {
+            return interaction.reply({ content: '❌ There is no active music playlist or queue right now!', ephemeral: true });
+        }
+
+        const requestedPage = interaction.options.getInteger('page') || 1;
+        const currentSong = queue.songs[0];
+        const upcomingSongs = queue.songs.slice(1);
+        const pageSize = 10;
+        const totalPages = Math.max(1, Math.ceil(upcomingSongs.length / pageSize));
+
+        if (requestedPage > totalPages) {
+            return interaction.reply({ content: `⚠️ Invalid page number. The playlist only has **${totalPages}** page(s).`, ephemeral: true });
+        }
+
+        const startIndex = (requestedPage - 1) * pageSize;
+        const pageSongs = upcomingSongs.slice(startIndex, startIndex + pageSize);
+
+        let upcomingText = '';
+        if (pageSongs.length > 0) {
+            upcomingText = pageSongs
+                .map((song, i) => `\`${startIndex + i + 1}.\` [${song.name}](${song.url}) - \`${song.formattedDuration}\``)
+                .join('\n');
+        } else {
+            upcomingText = '*No upcoming songs in the queue.*';
+        }
+
+        const repeatInfo = customRepeat.get(interaction.guildId);
+        let repeatModeStr = 'Disabled';
+        if (repeatInfo) {
+            repeatModeStr = `Repeating current song (${repeatInfo.remaining} time(s) left)`;
+        } else if (queue.repeatMode === RepeatMode.SONG) {
+            repeatModeStr = '🔂 Repeating current song indefinitely';
+        } else if (queue.repeatMode === RepeatMode.QUEUE) {
+            repeatModeStr = '🔁 Repeating entire queue indefinitely';
+        }
+
+        const embed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setTitle('📋 Server Music Playlist / Queue')
+            .setDescription(`**Now Playing:**\n🎶 [${currentSong.name}](${currentSong.url})\n⏱️ \`${queue.formattedCurrentTime} / ${currentSong.formattedDuration}\``)
+            .addFields(
+                { name: `📑 Up Next (Page ${requestedPage} of ${totalPages})`, value: upcomingText.substring(0, 1024) },
+                {
+                    name: '📊 Playlist Info',
+                    value: `• **Total Songs:** ${queue.songs.length}\n• **Total Duration:** \`${queue.formattedDuration}\`\n• **Repeat Mode:** ${repeatModeStr}\n• **Volume:** \`${queue.volume}%\``
+                }
+            )
+            .setFooter({ text: `Use /playlist [page] or /queue [page] to browse • /shuffle to randomize` });
+
+        if (currentSong.thumbnail) {
+            embed.setThumbnail(currentSong.thumbnail);
+        }
+
+        await interaction.reply({ embeds: [embed] });
+        return;
     }
 
     if (interaction.commandName === 'delete_message') {
