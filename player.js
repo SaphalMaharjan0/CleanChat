@@ -19,8 +19,11 @@ const say = (queue, text) => queue.textChannel?.send(text).catch(() => {});
 
 function repeatSuffix(queue) {
     const info = customRepeat.get(queue.id);
-    if (info) return ` 🔁 *(Repeat remaining: ${info.remaining})*`;
-    if (queue.repeatMode === RepeatMode.SONG) return ' 🔁 *(Looping indefinitely)*';
+    if (info) {
+        if (info.remaining === 0) return ` 🔁 *(Final repeat)*`;
+        return ` 🔁 *(Repeat remaining: ${info.remaining})*`;
+    }
+    if (queue.repeatMode === RepeatMode.SONG) return ' 🔂 *(Looping indefinitely)*';
     if (queue.repeatMode === RepeatMode.QUEUE) return ' 🔁 *(Queue looping)*';
     return '';
 }
@@ -45,10 +48,14 @@ export function createDistube(client) {
         })
         .on('finishSong', (queue, song) => {
             const tracker = customRepeat.get(queue.id);
-            if (tracker?.remaining > 0 && --tracker.remaining === 0) {
-                queue.setRepeatMode(RepeatMode.DISABLED);
-                customRepeat.delete(queue.id);
-                say(queue, `🔁 Finished repeating \`${song.name}\` (${tracker.total} times). Repeat mode disabled.`);
+            if (tracker && tracker.remaining !== undefined) {
+                if (tracker.remaining > 0) {
+                    tracker.remaining--;
+                } else {
+                    queue.setRepeatMode(RepeatMode.DISABLED);
+                    customRepeat.delete(queue.id);
+                    say(queue, `🔁 Finished repeating \`${song.name}\` (${tracker.total} times). Repeat mode disabled.`);
+                }
             }
         })
         .on('addSong', (queue, song) => {
