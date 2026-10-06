@@ -1,6 +1,6 @@
 import { DisTube, RepeatMode } from 'distube';
 import { SpotifyPlugin } from '@distube/spotify';
-import { FixedYtDlpPlugin } from './ytdlp-plugin.js';
+import { YouTubePlugin } from '@distube/youtube';
 import { customRepeat } from './state.js';
 
 let ffmpegPath = '';
@@ -33,7 +33,7 @@ export function createDistube(client) {
         plugins: [
             // Spotify links are read for song info, then matched to a YouTube result
             new SpotifyPlugin(spotifyOptions),
-            new FixedYtDlpPlugin({ update: true }),
+            new YouTubePlugin(),
         ],
         ...(ffmpegPath ? { ffmpeg: { path: ffmpegPath } } : {}),
     });
