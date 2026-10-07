@@ -68,7 +68,13 @@ export function createDistube(client) {
         })
         .on('error', (error, queue) => {
             console.error('[❌ DISTUBE ERROR]', error);
-            if (queue) say(queue, `❌ An error encountered: ${(error?.message || String(error)).slice(0, 1900)}`);
+            if (queue) {
+                if (queue.repeatMode === RepeatMode.SONG) {
+                    queue.setRepeatMode(RepeatMode.DISABLED);
+                    customRepeat.delete(queue.id);
+                }
+                say(queue, `❌ An error encountered: ${(error?.message || String(error)).slice(0, 1900)}`);
+            }
         })
         .on('disconnect', queue => {
             console.log(`[🔌 DISCONNECTED] Left voice channel in ${queue.voice.channel?.guild?.name}`);

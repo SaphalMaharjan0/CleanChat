@@ -41,6 +41,9 @@ async function skipSong(interaction) {
         if (queue.songs.length <= 1) {
             return interaction.reply({ content: '⚠️ There is no next song in the queue. Use `/stop` to stop the music.', flags: EPHEMERAL });
         }
+        if (queue.repeatMode === RepeatMode.SONG) {
+            queue.setRepeatMode(RepeatMode.DISABLED);
+        }
         try {
             await queue.skip();
             const next = queue.songs[0];
