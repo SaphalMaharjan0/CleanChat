@@ -1,4 +1,4 @@
-import { DisTube, RepeatMode } from 'distube';
+import { DisTube, RepeatMode, Playlist, Song } from 'distube';
 import { SpotifyPlugin } from '@distube/spotify';
 import { FixedYtDlpPlugin } from './ytdlp-plugin.js';
 import { customRepeat } from './state.js';
@@ -36,10 +36,38 @@ export function createDistube(client) {
         plugins: [
             // Spotify links are read for song info, then matched to a YouTube result
             new SpotifyPlugin(spotifyOptions),
-            new FixedYtDlpPlugin({ update: false }),
+            new FixedYtDlpPlugin({ update: true }),
         ],
         ...(ffmpegPath ? { ffmpeg: { path: ffmpegPath } } : {}),
     });
+
+    // Solve Node.js dual-package hazard by converting CommonJS Plugin outputs into ES Module objects
+    const originalPlay = distube.play.bind(distube);
+    distube.play = async function(voiceChannel, stringOrSong, options) {
+        if (typeof stringOrSong === 'string') {
+            try {
+                const cloneSong = (s, opts) => new Song(Object.assign({}, s, { playFromSource: s.stream?.playFromSource }), opts);
+                
+                let resolved = await distube.handler.resolve(stringOrSong, options);
+                if (resolved && resolved.songs && Array.isArray(resolved.songs)) {
+                    // Only clone songs that fail the ESM instanceof check (e.g. from CJS plugins)
+                    resolved.songs = resolved.songs.map(s => (s instanceof Song) ? s : cloneSong(s, options));
+                    // Recreate Playlist if it was a CJS playlist, though mapping the array is usually enough.
+                    if (!(resolved instanceof Playlist)) {
+                        resolved = new Playlist(resolved, options);
+                    }
+                } else if (resolved && !resolved.songs) {
+                    if (!(resolved instanceof Song)) {
+                        resolved = cloneSong(resolved, options);
+                    }
+                }
+                return originalPlay(voiceChannel, resolved, options);
+            } catch (e) {
+                // Let distube handle resolution errors naturally
+            }
+        }
+        return originalPlay(voiceChannel, stringOrSong, options);
+    };
 
     distube
         .on('playSong', (queue, song) => {
@@ -67,6 +95,10 @@ export function createDistube(client) {
             say(queue, `📋 Added \`${playlist.name}\` playlist (${playlist.songs.length} songs) to queue.`);
         })
         .on('error', (error, queue) => {
+            if (error?.message?.includes('playFromSource')) {
+                console.warn('[🎧 DISTUBE WARNING] Skipped a corrupted track (playFromSource error).');
+                return;
+            }
             console.error('[❌ DISTUBE ERROR]', error);
             if (queue) {
                 if (queue.repeatMode === RepeatMode.SONG) {
@@ -80,7 +112,9 @@ export function createDistube(client) {
             console.log(`[🔌 DISCONNECTED] Left voice channel in ${queue.voice.channel?.guild?.name}`);
         })
         .on('finish', () => console.log('[🏁 FINISHED] The queue has ended.'))
-        .on('empty', () => console.log('[🕳️ EMPTY VC] Voice channel is empty.'));
+        .on('empty', () => console.log('[🕳️ EMPTY VC] Voice channel is empty.'))
+        .on('debug', message => console.log(`[🎧 DISTUBE DEBUG] ${message}`))
+        .on('ffmpegDebug', message => console.log(`[FFMPEG DEBUG] ${message}`));
 
     return distube;
 }

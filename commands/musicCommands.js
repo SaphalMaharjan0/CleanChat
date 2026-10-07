@@ -157,6 +157,16 @@ export const play = {
     },
 };
 
+export const add = {
+    data: new SlashCommandBuilder()
+        .setName('add')
+        .setDescription('Add a song or playlist to the queue from YouTube or Spotify')
+        .addStringOption(o => o.setName('url').setDescription('A YouTube or Spotify link').setRequired(true))
+        .addIntegerOption(o => o.setName('repeat').setDescription('Number of times to repeat this song (e.g. 3)'))
+        .addBooleanOption(o => o.setName('loop').setDescription('Loop this song indefinitely (true/false)')),
+    execute: play.execute,
+};
+
 export const repeat = {
     data: new SlashCommandBuilder()
         .setName('repeat')

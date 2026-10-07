@@ -28,9 +28,7 @@ export function loadStayChannels() {
 function saveStayChannels() {
     try {
         if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
-        const tmpFile = `${vcDataFile}.${Date.now()}.tmp`;
-        fs.writeFileSync(tmpFile, JSON.stringify(Object.fromEntries(stayVoiceChannels)), 'utf8');
-        fs.renameSync(tmpFile, vcDataFile);
+        fs.writeFileSync(vcDataFile, JSON.stringify(Object.fromEntries(stayVoiceChannels)), 'utf8');
     } catch (e) {
         console.error('Failed to save stayVoiceChannels:', e);
     }
